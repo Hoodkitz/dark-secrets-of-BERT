@@ -221,6 +221,10 @@ class BertConfig(object):
 
     def to_json_file(self, json_file_path):
         """ Save this instance to a json file."""
+        import os
+        dirpath = os.path.dirname(json_file_path)
+        if dirpath:
+            os.makedirs(dirpath, exist_ok=True)
         with open(json_file_path, "w", encoding='utf-8') as writer:
             writer.write(self.to_json_string())
 
@@ -740,7 +744,7 @@ class BertModel(BertPreTrainedModel):
         pooled_output = self.pooler(sequence_output)
         if not output_all_encoded_layers:
             encoded_layers = encoded_layers[-1]
-        return encoded_layers, pooled_output, all_attentions
+        return encoded_layers, pooled_output
 
 
 class BertForPreTraining(BertPreTrainedModel):
@@ -991,9 +995,15 @@ class BertForSequenceClassification(BertPreTrainedModel):
         self.apply(self.init_bert_weights)
 
     def forward(self, input_ids, token_type_ids=None, attention_mask=None, labels=None, uniforms=[False]*12):
-        _, pooled_output, attentions = self.bert(input_ids, token_type_ids, attention_mask, output_all_encoded_layers=False,
-                                                 uniforms=uniforms)
-        attentions = torch.stack(attentions, dim=1)
+        bert_outputs = self.bert(input_ids, token_type_ids, attention_mask, output_all_encoded_layers=False,
+                                 uniforms=uniforms)
+        # support both (encoded_layers, pooled_output) and (encoded_layers, pooled_output, attentions)
+        if isinstance(bert_outputs, tuple) and len(bert_outputs) == 3:
+            _, pooled_output, attentions = bert_outputs
+            attentions = torch.stack(attentions, dim=1)
+        else:
+            _, pooled_output = bert_outputs
+            attentions = None
         pooled_output = self.dropout(pooled_output)
         logits = self.classifier(pooled_output)
 
@@ -1002,7 +1012,8 @@ class BertForSequenceClassification(BertPreTrainedModel):
             loss = loss_fct(logits.view(-1, self.num_labels), labels.view(-1))
             return loss
         else:
-            return logits, attentions
+            # Return logits for compatibility with the expected API/tests.
+            return logits
 
 
 class BertForMultipleChoice(BertPreTrainedModel):

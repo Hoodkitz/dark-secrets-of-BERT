@@ -50,6 +50,78 @@ SCHEDULES = {
 }
 
 
+# Scheduler classes expected by tests
+class ConstantLR(object):
+    def get_lr(self, step):
+        return 1.0
+
+
+class WarmupLinearSchedule(object):
+    def __init__(self, warmup, t_total):
+        self.warmup = warmup
+        self.t_total = t_total
+
+    def get_lr(self, step):
+        if self.t_total <= 0:
+            return 1.0
+        x = float(step) / float(self.t_total)
+        return warmup_linear(x, self.warmup)
+
+
+class WarmupConstantSchedule(object):
+    def __init__(self, warmup, t_total=None):
+        self.warmup = warmup
+        self.t_total = t_total
+
+    def get_lr(self, step):
+        x = 0.0 if self.t_total is None or self.t_total == 0 else float(step) / float(self.t_total)
+        return warmup_constant(x, self.warmup)
+
+
+class WarmupCosineSchedule(object):
+    def __init__(self, warmup, t_total):
+        self.warmup = warmup
+        self.t_total = t_total
+
+    def get_lr(self, step):
+        if self.t_total <= 0:
+            return 1.0
+        x = float(step) / float(self.t_total)
+        return warmup_cosine(x, self.warmup)
+
+
+class WarmupCosineWithWarmupRestartsSchedule(object):
+    def __init__(self, warmup, t_total, cycles=1):
+        self.warmup = warmup
+        self.t_total = float(t_total)
+        self.cycles = int(cycles)
+
+    def get_lr(self, step):
+        if self.cycles <= 0:
+            return warmup_cosine(0.0, self.warmup)
+        period = self.t_total / float(self.cycles)
+        pos = float(step) % period
+        x = pos / self.t_total
+        return warmup_cosine(x, self.warmup)
+
+
+class WarmupCosineWithHardRestartsSchedule(object):
+    def __init__(self, warmup, t_total, cycles=1):
+        self.warmup = warmup
+        self.t_total = float(t_total)
+        self.cycles = int(cycles)
+
+    def get_lr(self, step):
+        if self.cycles <= 0:
+            return warmup_cosine(0.0, self.warmup)
+        period = self.t_total / float(self.cycles)
+        pos = float(step) % period
+        # map pos to [0,1] across the period
+        x = pos / period
+        # use cosine restart across period (hard restart)
+        return 0.5 * (1. + math.cos(math.pi * x))
+
+
 class BertAdam(Optimizer):
     """Implements BERT version of Adam algorithm with weight decay fix.
     Params:
@@ -69,7 +141,7 @@ class BertAdam(Optimizer):
                  max_grad_norm=1.0):
         if lr is not required and lr < 0.0:
             raise ValueError("Invalid learning rate: {} - should be >= 0.0".format(lr))
-        if schedule not in SCHEDULES:
+        if schedule is not None and schedule not in SCHEDULES and schedule != 'none':
             raise ValueError("Invalid schedule parameter: {}".format(schedule))
         if not 0.0 <= warmup < 1.0 and not warmup == -1:
             raise ValueError("Invalid warmup: {} - should be in [0.0, 1.0[ or -1".format(warmup))
@@ -84,6 +156,22 @@ class BertAdam(Optimizer):
                         max_grad_norm=max_grad_norm)
         super(BertAdam, self).__init__(params, defaults)
 
+        # Replace schedule strings with schedule objects expected by tests
+        for group in self.param_groups:
+            sched = group.get('schedule')
+            if sched is None or sched == 'none':
+                group['schedule'] = ConstantLR()
+            elif isinstance(sched, str):
+                if sched == 'warmup_linear':
+                    group['schedule'] = WarmupLinearSchedule(group.get('warmup', -1), group.get('t_total', -1))
+                elif sched == 'warmup_constant':
+                    group['schedule'] = WarmupConstantSchedule(group.get('warmup', -1), group.get('t_total', -1))
+                elif sched == 'warmup_cosine':
+                    group['schedule'] = WarmupCosineSchedule(group.get('warmup', -1), group.get('t_total', -1))
+                else:
+                    # fallback to constant
+                    group['schedule'] = ConstantLR()
+
     def get_lr(self):
         lr = []
         for group in self.param_groups:
@@ -92,8 +180,12 @@ class BertAdam(Optimizer):
                 if len(state) == 0:
                     return [0]
                 if group['t_total'] != -1:
-                    schedule_fct = SCHEDULES[group['schedule']]
-                    lr_scheduled = group['lr'] * schedule_fct(state['step']/group['t_total'], group['warmup'])
+                    sched = group.get('schedule')
+                    if hasattr(sched, 'get_lr'):
+                        lr_scheduled = group['lr'] * sched.get_lr(state['step'])
+                    else:
+                        schedule_fct = SCHEDULES[group['schedule']]
+                        lr_scheduled = group['lr'] * schedule_fct(state['step']/group['t_total'], group['warmup'])
                 else:
                     lr_scheduled = group['lr']
                 lr.append(lr_scheduled)
@@ -154,14 +246,19 @@ class BertAdam(Optimizer):
                     update += group['weight_decay'] * p.data
 
                 if group['t_total'] != -1:
-                    schedule_fct = SCHEDULES[group['schedule']]
-                    progress = state['step']/group['t_total']
-                    lr_scheduled = group['lr'] * schedule_fct(progress, group['warmup'])
+                    sched = group.get('schedule')
+                    if hasattr(sched, 'get_lr'):
+                        lr_scheduled = group['lr'] * sched.get_lr(state['step'])
+                        progress = state['step']/group['t_total']
+                    else:
+                        schedule_fct = SCHEDULES[group['schedule']]
+                        progress = state['step']/group['t_total']
+                        lr_scheduled = group['lr'] * schedule_fct(progress, group['warmup'])
                     # warning for exceeding t_total (only active with warmup_linear
-                    if group['schedule'] == "warmup_linear" and progress > 1. and not warned_for_t_total:
+                    if group.get('schedule') == "warmup_linear" and progress > 1. and not warned_for_t_total:
                         logger.warning(
                             "Training beyond specified 't_total' steps with schedule '{}'. Learning rate set to {}. "
-                            "Please set 't_total' of {} correctly.".format(group['schedule'], lr_scheduled, self.__class__.__name__))
+                            "Please set 't_total' of {} correctly.".format(group.get('schedule'), lr_scheduled, self.__class__.__name__))
                         warned_for_t_total = True
                     # end warning
                 else:

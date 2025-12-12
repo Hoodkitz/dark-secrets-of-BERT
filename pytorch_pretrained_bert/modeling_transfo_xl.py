@@ -584,12 +584,14 @@ class RelPartialLearnableMultiHeadAttn(RelMultiHeadAttn):
 
         #### compute attention probability
         if attn_mask is not None and attn_mask.any().item():
-            if attn_mask.dim() == 2:
+            # ensure boolean mask for masked_fill (PyTorch expects bool)
+            attn_mask_bool = attn_mask.bool()
+            if attn_mask_bool.dim() == 2:
                 attn_score = attn_score.float().masked_fill(
-                    attn_mask[None,:,:,None], -1e30).type_as(attn_score)
-            elif attn_mask.dim() == 3:
+                    attn_mask_bool[None,:,:,None], -1e30).type_as(attn_score)
+            elif attn_mask_bool.dim() == 3:
                 attn_score = attn_score.float().masked_fill(
-                    attn_mask[:,:,:,None], -1e30).type_as(attn_score)
+                    attn_mask_bool[:,:,:,None], -1e30).type_as(attn_score)
 
         # [qlen x klen x bsz x n_head]
         attn_prob = F.softmax(attn_score, dim=1)

@@ -179,6 +179,10 @@ class GPT2Config(object):
 
     def to_json_file(self, json_file_path):
         """ Save this instance to a json file."""
+        import os
+        dirpath = os.path.dirname(json_file_path)
+        if dirpath:
+            os.makedirs(dirpath, exist_ok=True)
         with open(json_file_path, "w", encoding='utf-8') as writer:
             writer.write(self.to_json_string())
 

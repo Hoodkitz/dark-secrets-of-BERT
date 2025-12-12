@@ -49,6 +49,15 @@ SCHEDULES = {
     'warmup_linear':warmup_linear,
 }
 
+# Reuse schedule classes from optimization.py if available; fallback to function-based schedules
+try:
+    from .optimization import ConstantLR, WarmupLinearSchedule, WarmupConstantSchedule, WarmupCosineSchedule
+except Exception:
+    ConstantLR = None
+    WarmupLinearSchedule = None
+    WarmupConstantSchedule = None
+    WarmupCosineSchedule = None
+
 
 class OpenAIAdam(Optimizer):
     """Implements Open AI version of Adam algorithm with weight decay fix.
@@ -58,7 +67,7 @@ class OpenAIAdam(Optimizer):
                  vector_l2=False, max_grad_norm=-1, **kwargs):
         if lr is not required and lr < 0.0:
             raise ValueError("Invalid learning rate: {} - should be >= 0.0".format(lr))
-        if schedule not in SCHEDULES:
+        if schedule is not None and schedule not in SCHEDULES and schedule != 'none':
             raise ValueError("Invalid schedule parameter: {}".format(schedule))
         if not 0.0 <= warmup < 1.0 and not warmup == -1:
             raise ValueError("Invalid warmup: {} - should be in [0.0, 1.0[ or -1".format(warmup))
@@ -72,6 +81,20 @@ class OpenAIAdam(Optimizer):
                         b1=b1, b2=b2, e=e, weight_decay=weight_decay, vector_l2=vector_l2,
                         max_grad_norm=max_grad_norm)
         super(OpenAIAdam, self).__init__(params, defaults)
+
+        # Replace schedule strings with schedule objects when available
+        for group in self.param_groups:
+            sched = group.get('schedule')
+            if sched is None or sched == 'none':
+                if ConstantLR is not None:
+                    group['schedule'] = ConstantLR()
+            elif isinstance(sched, str) and WarmupLinearSchedule is not None:
+                if sched == 'warmup_linear':
+                    group['schedule'] = WarmupLinearSchedule(group.get('warmup', -1), group.get('t_total', -1))
+                elif sched == 'warmup_constant':
+                    group['schedule'] = WarmupConstantSchedule(group.get('warmup', -1), group.get('t_total', -1))
+                elif sched == 'warmup_cosine':
+                    group['schedule'] = WarmupCosineSchedule(group.get('warmup', -1), group.get('t_total', -1))
 
     def get_lr(self):
         lr = []
